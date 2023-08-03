@@ -3,21 +3,18 @@ Author: Alek Westover
 TODOs:
 - performance testing
 - cache locality
-- granularity thresholds
-- other TODOs in the code
-- probably a reasonable refactor is: instead of storing these offset things just
-increment the pointers
+- tune
 
 Description:
 parallel k-merge
 
-Let's say you have p processors, assume power of 2 for simplicity
-make a tree with p leaves
-
-each vertex in the tree corresponds to a 2-merge
-on the i-th level of the tree, counting up from the bottom you can have 2^i
-processors for the 2-merge The 2-merge splits into odd / even steps for as many
-processors as it has and the final swaps are also done in parallel
+Say that you have k (a power of 2 for now) sorted lists
+and want to merge them into a single sorted list using p (a power of 2)
+processors.
+We make a tree with p leaves, where each vertex in the tree corresponds to
+merging two lists. Parallelism across these vertices is easy.
+Within each of these pair merges we can also achieve parallelism via merging odd
+/ even halves of the array first and then doing some swaps in parallel.
 */
 
 #include <cassert>
@@ -29,10 +26,8 @@ using namespace std;
 
 // helper function: print an array
 void printarr(int *A, int n) {
-  for (int i = 0; i < n; i++) {
-    cout << A[i] << " ";
-  }
-  cout << endl;
+  for (int i = 0; i < n; i++) std::cout << A[i] << " ";
+  std::cout << endl;
 }
 
 // compare elements start and start+step
@@ -80,8 +75,7 @@ void neighbor_swaps(int *A, int *B, uint n, uint step, uint offset, uint p) {
 // and same for B
 // at the end this function writes the data back on to A, B
 void serial_merge_pair(int *A, int *B, uint n, uint step, uint offset) {
-  int *C =
-      (int *)malloc(2 * n * sizeof(int));  // Allocates memory for 5 integers
+  int *C = (int *)malloc(2 * n * sizeof(int));
   uint a = 0;
   uint b = 0;
   while (a < n && b < n) {
@@ -118,8 +112,8 @@ void serial_merge_pair(int *A, int *B, uint n, uint step, uint offset) {
 // merge even odd (recursively, with this method!). then stitch them together
 void parallel_merge_pair(int *A, int *B, uint n, uint step, uint offset,
                          uint p) {
-  // TODO: if n < threshold, just serialize
-  if (p == 1) {
+  const int THRESHOLD = 256;
+  if (p <= 1 || n < THRESHOLD) {
     serial_merge_pair(A, B, n, step, offset);
   } else {
     // merge even odd
@@ -137,31 +131,31 @@ void parallel_merge_pair(int *A, int *B, uint n, uint step, uint offset,
   }
 }
 
-// TODO: FIX this function, and add tests and add description of what it does
 // assumes num_arrays and p (num_processors) are powers of 2
-void kmerge_pll_tree(int *arrays, uint array_size, uint num_arrays,
-                     uint first_array, uint p) {
+// Takes a list of sorted arrays, namely
+// arrays, arrays+array_size, ... arrays+array_size*(num_arrays-1)
+// each of size array_size and merges them
+// into the array arrays
+void kmerge_pll_tree(int *arrays, uint array_size, uint num_arrays, uint p) {
+  const int THRESHOLD = 256;
   if (num_arrays > 2) {
-    // TODO : have some other threshold
-    if (p > 1) {
+    if (p > 1 || array_size * num_arrays <= THRESHOLD) {
       std::thread left_thread([&]() {
-        kmerge_pll_tree(arrays, array_size, num_arrays >> 1, first_array,
-                        p >> 1);
+        kmerge_pll_tree(arrays, array_size, num_arrays >> 1, p >> 1);
       });
       std::thread right_thread([&]() {
-        kmerge_pll_tree(arrays, array_size, num_arrays >> 1,
-                        first_array + num_arrays / 2, p >> 1);
+        kmerge_pll_tree(arrays + array_size * num_arrays / 2, array_size,
+                        num_arrays >> 1, p >> 1);
       });
       left_thread.join();
       right_thread.join();
     } else {
-      kmerge_pll_tree(arrays, array_size, num_arrays >> 1, first_array, 1);
-      kmerge_pll_tree(arrays, array_size, num_arrays >> 1,
-                      first_array + num_arrays / 2, 1);
+      kmerge_pll_tree(arrays, array_size, num_arrays >> 1, p);
+      kmerge_pll_tree(arrays + array_size * num_arrays / 2, array_size,
+                      num_arrays >> 1, p);
     }
   }
-  parallel_merge_pair(arrays + first_array * array_size,
-                      arrays + (first_array + num_arrays / 2) * array_size,
+  parallel_merge_pair(arrays, arrays + array_size * num_arrays / 2,
                       array_size * num_arrays / 2, 1, 0, p);
 }
 
@@ -278,14 +272,14 @@ void test_parallel_merge2() {
 }
 
 void test_kmerge_pll_tree() {
-  const int N = 16;
+  const int N = 1024;
   int *A = new int[4 * N];
   for (int i = 0; i < 4; i++) {
     for (int j = 0; j < N; j++) {
       A[N * i + j] = N * (5 - i) + j;
     }
   }
-  kmerge_pll_tree(A, N, 4, 0, 1);
+  kmerge_pll_tree(A, N, 4, 1);
   for (int i = 0; i < 4 * N - 1; i++) {
     assert(A[i] <= A[i + 1]);
   }
